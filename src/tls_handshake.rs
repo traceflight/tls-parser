@@ -758,7 +758,7 @@ fn parse_tls_certificate_inner(
         false => cert_len as usize,
         true => min(cert_len as usize, i.len()),
     };
-    let (i, cert_chain) = map_parser(take(cert_len as usize), parse_certs)(i)?;
+    let (i, cert_chain) = map_parser(take(cert_len), parse_certs)(i)?;
     let content = TlsCertificateContents { cert_chain };
     Ok((i, content))
 }
