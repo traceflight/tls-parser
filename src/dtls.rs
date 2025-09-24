@@ -56,6 +56,8 @@ pub struct DTLSClientHello<'a> {
     /// A list of compression methods supported by client
     pub comp: Vec<TlsCompressionID>,
     pub ext: Option<&'a [u8]>,
+    /// Whether this ClientHello message is complete or a fragment
+    pub is_parsing_complete: bool,
 }
 
 impl<'a> ClientHello<'a> for DTLSClientHello<'a> {
@@ -99,6 +101,24 @@ pub struct DTLSMessageHandshake<'a> {
     pub fragment_offset: u32,
     pub fragment_length: u32,
     pub body: DTLSMessageHandshakeBody<'a>,
+}
+
+impl DTLSMessageHandshake<'_> {
+    pub fn is_parsing_complete(&self) -> bool {
+        match &self.body {
+            DTLSMessageHandshakeBody::ClientHello(ch) => ch.is_parsing_complete,
+            DTLSMessageHandshakeBody::Certificate(certs) => certs.is_parsing_complete,
+            _ => true,
+        }
+    }
+
+    pub fn update_parsing_status(&mut self, complete: bool) {
+        match &mut self.body {
+            DTLSMessageHandshakeBody::ClientHello(ch) => ch.is_parsing_complete = complete,
+            DTLSMessageHandshakeBody::Certificate(certs) => certs.is_parsing_complete = complete,
+            _ => {}
+        }
+    }
 }
 
 /// DTLS Generic handshake message
@@ -173,16 +193,6 @@ fn parse_dtls_fragment(i: &[u8]) -> IResult<&[u8], DTLSMessageHandshakeBody<'_>>
 
 /// DTLS Client Hello
 // Section 4.2 of RFC6347
-fn parse_dtls_client_hello(i: &[u8]) -> IResult<&[u8], DTLSMessageHandshakeBody<'_>> {
-    parse_dtls_client_hello_inner(i, false)
-}
-
-/// DTLS Client Hello allow partial
-// Section 4.2 of RFC6347
-fn parse_partial_dtls_client_hello(i: &[u8]) -> IResult<&[u8], DTLSMessageHandshakeBody<'_>> {
-    parse_dtls_client_hello_inner(i, true)
-}
-
 fn parse_dtls_client_hello_inner(
     i: &[u8],
     allow_partial: bool,
@@ -197,6 +207,7 @@ fn parse_dtls_client_hello_inner(
     let (i, comp_len) = be_u8(i)?;
     let (i, comp) = parse_compressions_algs(i, comp_len as usize)?;
     let (i, ext_len) = be_u16(i)?;
+    let is_parsing_complete = ext_len as usize <= i.len();
     let ext_len = match allow_partial {
         false => ext_len as usize,
         true => min(ext_len as usize, i.len()),
@@ -210,6 +221,7 @@ fn parse_dtls_client_hello_inner(
         ciphers,
         comp,
         ext,
+        is_parsing_complete,
     };
     Ok((i, DTLSMessageHandshakeBody::ClientHello(content)))
 }
@@ -252,19 +264,6 @@ fn parse_dtls_handshake_msg_clientkeyexchange(
     )(i)
 }
 
-fn parse_dtls_handshake_msg_certificate(i: &[u8]) -> IResult<&[u8], DTLSMessageHandshakeBody<'_>> {
-    map(parse_tls_certificate, DTLSMessageHandshakeBody::Certificate)(i)
-}
-
-fn parse_partial_dtls_handshake_msg_certificate(
-    i: &[u8],
-) -> IResult<&[u8], DTLSMessageHandshakeBody<'_>> {
-    map(
-        parse_partial_tls_certificate,
-        DTLSMessageHandshakeBody::Certificate,
-    )(i)
-}
-
 /// Parse a DTLS handshake message
 pub fn parse_dtls_message_handshake(i: &[u8]) -> IResult<&[u8], DTLSMessage<'_>> {
     parse_dtls_message_handshake_inner(i, false)
@@ -290,6 +289,8 @@ fn parse_dtls_message_handshake_inner(
     // all the fragments. The DTLS spec allows for overlapping and duplicated fragments.
     let is_fragment = fragment_offset > 0 || fragment_length < length;
 
+    let is_data_complete = fragment_length <= i.len() as u32;
+
     let fragment_length = match allow_partial {
         false => fragment_length,
         true => min(fragment_length, i.len() as u32),
@@ -299,10 +300,7 @@ fn parse_dtls_message_handshake_inner(
 
     let (_, body) = match msg_type {
         _ if (is_fragment && !allow_partial) => parse_dtls_fragment(raw_msg),
-        TlsHandshakeType::ClientHello => match allow_partial {
-            false => parse_dtls_client_hello(raw_msg),
-            true => parse_partial_dtls_client_hello(raw_msg),
-        },
+        TlsHandshakeType::ClientHello => parse_dtls_client_hello_inner(raw_msg, allow_partial),
         TlsHandshakeType::HelloVerifyRequest => parse_dtls_hello_verify_request(raw_msg),
         TlsHandshakeType::ServerHello => parse_dtls_handshake_msg_server_hello_tlsv12(raw_msg),
         TlsHandshakeType::ServerDone => {
@@ -311,16 +309,14 @@ fn parse_dtls_message_handshake_inner(
         TlsHandshakeType::ClientKeyExchange => {
             parse_dtls_handshake_msg_clientkeyexchange(raw_msg, length as usize)
         }
-        TlsHandshakeType::Certificate => match allow_partial {
-            false => parse_dtls_handshake_msg_certificate(raw_msg),
-            true => parse_partial_dtls_handshake_msg_certificate(raw_msg),
-        },
+        TlsHandshakeType::Certificate => parse_tls_certificate_inner(raw_msg, allow_partial)
+            .map(|(rem, certs)| (rem, DTLSMessageHandshakeBody::Certificate(certs))),
         _ => {
             // eprintln!("Unsupported message type {:?}", msg_type);
             Err(Err::Error(make_error(i, ErrorKind::Switch)))
         }
     }?;
-    let msg = DTLSMessageHandshake {
+    let mut msg = DTLSMessageHandshake {
         msg_type,
         length,
         message_seq,
@@ -328,6 +324,9 @@ fn parse_dtls_message_handshake_inner(
         fragment_length,
         body,
     };
+    if msg.is_parsing_complete() && !is_data_complete {
+        msg.update_parsing_status(is_data_complete);
+    }
     Ok((i, DTLSMessage::Handshake(msg)))
 }
 

@@ -73,6 +73,7 @@ static CH : &[u8] = &[
                     ciphers: ciphers.iter().map(|&x| TlsCipherSuiteID(x)).collect(),
                     comp,
                     ext: Some(&CH[220..]),
+                    is_parsing_complete: true,
                 },
             ))],
         };
@@ -112,16 +113,17 @@ static CH : &[u8] = &[
                     session_id: None,
                     ciphers: ciphers.iter().map(|&x| TlsCipherSuiteID(x)).collect(),
                     comp,
-                    ext: Some(&CH[220..CH.len() - 10]),
+                    ext: Some(&CH[220..CH.len() - 11]),
+                    is_parsing_complete: false,
                 },
             ))],
         };
-        let res = parse_tls_plaintext(&CH[..CH.len() - 10]);
+        let res = parse_tls_plaintext(&CH[..CH.len() - 11]);
         assert_eq!(
             res,
-            Err(Err::Incomplete(Needed::Size(NonZero::new(10).unwrap())))
+            Err(Err::Incomplete(Needed::Size(NonZero::new(11).unwrap())))
         );
-        let res = parse_partial_tls_plaintext(&CH[..CH.len() - 10]);
+        let res = parse_partial_tls_plaintext(&CH[..CH.len() - 11]);
         assert_eq!(res, Ok((empty, expected)));
     }
 
@@ -512,7 +514,10 @@ static SERVER_REPLY1: &[u8] = &[
                 len: 3081,
             },
             msg: vec![TlsMessage::Handshake(TlsMessageHandshake::Certificate(
-                TlsCertificateContents { cert_chain: chain },
+                TlsCertificateContents {
+                    cert_chain: chain,
+                    is_parsing_complete: true,
+                },
             ))],
         };
         assert_eq!(parse_tls_plaintext(bytes), Ok((empty, expected)));
@@ -541,7 +546,10 @@ static SERVER_REPLY1: &[u8] = &[
                 len: 3081,
             },
             msg: vec![TlsMessage::Handshake(TlsMessageHandshake::Certificate(
-                TlsCertificateContents { cert_chain: chain },
+                TlsCertificateContents {
+                    cert_chain: chain,
+                    is_parsing_complete: true,
+                },
             ))],
         };
 
